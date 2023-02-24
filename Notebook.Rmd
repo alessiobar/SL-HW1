@@ -1,0 +1,408 @@
+---
+title: "HW1"
+author: "Barboni Alessio - Redaelli Francesco"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plotly)
+```
+
+# Part I
+## Exploratory data visualization
+
+```{r Early plots}
+
+# Load the data
+wmap <- read.csv("wmap.csv")
+
+# Plot
+lay.mat = matrix(c(1,1,2,3), nrow = 2, byrow = T)
+layout(lay.mat)
+
+# All
+plot(wmap$x, wmap$y, pch = 21, bg = "yellow", cex = .7,
+main = "CMB data (WMAP)", xlab = "Multipole", ylab = "Power")
+polygon(c(0,400,400,0),
+c(min(wmap$y), min(wmap$y), max(wmap$y), max(wmap$y)),
+border = NA, col = rgb(0,0,0,.3))
+
+# First bump
+plot(wmap$x[1:400], wmap$y[1:400], pch = 21, bg = "green", cex = .7,
+main = "Main bump", xlab = "Multipole", ylab = "Power")
+
+# Secondary bump(s)
+plot(wmap$x[-(1:400)], wmap$y[-(1:400)], pch = 21, bg = "red", cex = .7,
+main = "Secondary bump(s) (?)", xlab = "Multipole", ylab = "Power")
+```
+
+The idea of regression splines is in line with the “be linear in transformed feature space” mantra. Since linear models can’t capture non-linearity that we can observe in the data, we would like to boost flexibility of our model by being linear in some "richer", artificial feature space. Starting from 1 single covariate (*wmap$x*), we can go very high dimensional by mapping it to a bunch of new variables (the elements of the set of *truncated power functions*); the mapping functions will be highly non-linear in original space, but *linear* (i.e. linear in the parameters) in the new space (and that is all we care about!)
+
+## Plots of elements of *G~{d,q}~* with *(d,q) = {(1,3), (1,10), (3,3)}*
+
+```{r Part I Pt.2}
+
+# Plots functions
+qknots <- function(x,q){
+  return(seq(from = min(x), to = max(x), length.out = q+2)[2:(q+1)])
+}
+
+Gdq_plot <- function(d,q){
+  
+  # Pick q equispaced knots
+  q_knots <- qknots(c(0,1),q)
+  
+  # Set-up proper plots grid according to input parameters
+  if(d==1 && q==3) par(mfrow = c(2, 3))
+  if(d==1 && q==10) par(mfrow = c(3, 4))
+  if(d==3 && q==3) par(mfrow = c(3, 3))
+  if(d==3 && q==10) par(mfrow = c(4, 4))
+  
+  # Plot the elements of the truncated power functions set *Gdq*
+  
+  # First d+1 functions
+  for(i in 0:d){
+    curve(x**i, xlim = c(0,2), ylim = c(0,2), xlab = "", ylab = "", main =
+    ifelse(i==0, "y = 1", paste("y = x^",i,sep="")))
+  }
+  # Last q functions
+  for(i in 1:q){
+    curve(((x-q_knots[i])**d)*((x-q_knots[i])**d>0), xlim = c(0,2), ylim =
+    c(0,2), xlab = "", ylab = "", main = paste("y = max(0,(x-E.",i,")^",d,")",sep=""))}
+  
+par(mfrow = c(1,1))
+}
+```
+
+```{r Part I Pt.2 Plots}
+
+Gdq_plot(d=1,q=3)
+Gdq_plot(d=1,q=10)
+Gdq_plot(d=3,q=3)
+```
+
+## Regression splines implementation
+### Number of knots *q* tuned by grid-search between q~min~ = 4 and q~max~ = 10
+
+```{r Part I Pt.3}
+
+# Choose grid-search range
+q_min <- 4
+q_max <- 10
+
+# Build (d,q)-combinations list
+dq_grid <- list()
+
+c = 0
+
+for(i in c(1,3)){
+  for(q in q_min:q_max){
+    c <- c+1
+    v <- c(i,q)
+    dq_grid[[c]] <- v
+  }
+}
+
+# Build design matrix X function
+regr_spline <- function(x,dq_pair){
+  d <- dq_pair[1]
+  q <- dq_pair[2]
+  X <- matrix(NA, length(x), d+1+q)
+  q_knots <- qknots(x,q)
+  for(j in 1:(d+1+q)){
+    if(j<=d+1) X[,j]=x**(j-1)
+    else X[,j]=((x-q_knots[j-d-1])**d)*((x-q_knots[j-d-1])**d>0)
+  }
+  return(X)
+}
+
+regr_spline_vect <- Vectorize(regr_spline, vectorize.args = "dq_pair")
+
+# Build design matrix for each (d,q)-combination
+design_matrices <- regr_spline_vect(wmap$x,dq_grid)
+```
+
+## GCV
+
+```{r GCV}
+
+# Count n° parameters function
+npar_count <- function(x){
+  return(x[1]+x[2]+1)
+}
+
+set.seed(2022)
+
+# Choose best (d,q)-combination via GCV
+npars <- unlist(lapply(dq_grid, npar_count))
+spline_formula <- function(x){
+  X_df <- as.data.frame(x)[,-1]
+  X_df$y <- wmap$y
+  return(lm(y ~ .,X_df))}
+fits    <- lapply(design_matrices, spline_formula)
+MSEs.tr <- unlist(lapply(fits, deviance))/length(wmap$x)
+GCV     <- MSEs.tr/(1-(npars)/length(wmap$x))^2
+
+dq_grid[which.min(GCV)] # optimal GCV-based (d,q) combination
+min(GCV)
+```
+
+### GCV-score visualization
+
+```{r Visualization GCV}
+
+d_list <- list()
+q_list <- list()
+
+for(i in 1:length(dq_grid)){
+  d_list[[i]] <- dq_grid[[i]][1]
+  q_list[[i]] <- dq_grid[[i]][2]
+}
+
+axx <- list(title = "d")
+axy <- list(title = "q")
+axz <- list(title = "GCV Score")
+
+fig <- plot_ly(x = d_list, y = q_list, z = GCV, type="scatter3d", mode="markers")
+fig <- fig %>% layout(scene = list(xaxis=axx, yaxis=axy, zaxis=axz))
+
+fig
+```
+
+## LOOCV
+
+```{r LOOCV}
+
+loocv_scores <- array()
+
+set.seed(2022)
+
+for(j in 1:length(design_matrices)){
+  
+X_df <- as.data.frame(design_matrices[j])[,-1]
+X_df$y <- wmap$y
+
+oneout <- array() # Init the LOOCV-score vector
+for (i in 1:length(X_df$y)){
+  fit_i  <- lm( y ~ ., data = X_df[-i,] ) 
+  yhat_i <- predict(fit_i, newdata = X_df[i,] ) 
+  oneout[i] <- ( X_df$y[i] -  yhat_i )^2
+}
+loocv_scores[j] <- mean(oneout) # LOOCV-score
+}
+
+dq_grid[which.min(loocv_scores)]  # optimal LOOCV-based (d,q) combination
+min(loocv_scores)
+```
+
+## K-fold CV
+
+```{r K-fold CV}
+
+kfold_cv_scores <- array()
+
+K <- 5 # N° of folds
+
+set.seed(2022)
+
+for(i in 1:length(design_matrices)){
+  X_df <- as.data.frame(design_matrices[i])[,-1]
+  X_df$y <- wmap$y
+  
+  folds <- sample(rep(1:K, length = length(wmap$x)))
+  table(folds)
+  KCV <- vector() # Init the CV-score vector
+
+  for (k in 1:K){
+    fit <- lm(y ~ ., X_df, subset = which(folds != k))
+    x.out <- X_df[which(folds == k),]
+    yhat <- predict(fit, newdata = x.out)
+    y.out <- X_df$y[which(folds == k)]
+    KCV[k] <- mean( ( y.out - yhat )^2 )
+  }
+  kfold_cv_scores[i] <- mean(KCV)  # K-CV estimate
+}
+
+dq_grid[which.min(kfold_cv_scores)]  # optimal K-fold CV-based (d,q) combination
+min(kfold_cv_scores)
+```
+
+We selected the *(3,4)* *(d,q)-combination*, achieving the minimum score for both the GCV and K-fold CV (best fit) methods.
+
+## Regression splines VS GCV-tuned polynomial regression
+
+```{r Part I Pt.4}
+
+# Fit regression splines
+X <- regr_spline(wmap$x, c(3,4))
+
+X_df <- as.data.frame(X)[,-1]
+X_df$y <- wmap$y
+
+fit_rp <- lm(y ~ ., data = X_df)
+```
+
+```{r GCV-tuned polynomial regression}
+
+# Fit GCV-tuned polynomial regression
+ds <- 0:25
+ps <- ds + 1
+fun <- function(d) if (d == 0) lm(y ~ 1, wmap) else lm(y ~ poly(x, degree = d), wmap)
+fits <- lapply(ds, fun)
+MSEs.tr <- unlist( lapply(fits, deviance) )/length(wmap$x)
+GCV <- MSEs.tr / (1 - (ps)/length(wmap$x) )^2
+
+plot(ds, GCV, type = "b", xlab = "d")
+d_opt <- ds[ which.min(GCV) ] # optimal GCV polynomial degree
+d_opt
+min(GCV)
+
+opt_poly <- lm(y ~ poly(x, degree = d_opt), wmap)
+```
+
+The plot shows a decreasing trend of the *GCV score* at the different degrees *d* in the selected *d*-range, achieving the minimum at the *d = 25*. Unfortunately, the increasing complexity (leading to potential numerical overflow issues) prevented us from analyzing the behavior at higher polynomial degrees.
+
+```{r Plots}
+
+# Plots
+plot(wmap$x, wmap$y, pch = 21, bg = "yellow", cex = .7,
+main = "CMB data (WMAP) - Regression splines fit", xlab = "Multipole", ylab = "Power")
+legend("topleft", legend=c("Regression Splines", "Knots"),col=c("blue", "red"), lty = 1:2, lwd = 3)
+lines(wmap$x, predict(fit_rp, X_df), lwd = 3, col = "blue")
+knots <- qknots(wmap$x, 4)
+for(i in 1:4) lines(c(knots[i],knots[i]), c(-1e7,1e7), lty = 2, lwd = 1, col = "red")
+
+plot(wmap$x, wmap$y, pch = 21, bg = "yellow", cex = .7,
+main = "CMB data (WMAP) - Polynomial regression fit", xlab = "Multipole", ylab = "Power")
+legend("topleft", legend=c("Polynomial Regression"),col=c("red"), lty=1, lwd = 3)
+lines(wmap$x, predict(opt_poly,data.frame(x = wmap$x)), lwd = 3, col = "red")
+```
+
+In setting up the *Regression Splines*, we went for an easy-to-implement option: *d* was selected in a small set *{1,3}* and the positions of knots were chosen according to a *rather strict* constraint of equispatiality. The (d,q)-splines selected (with *q* tuned under the aforementioned limitations) exhibits a different behavior with respect to the *GCV-tuned polynomial* mostly for high Multipole values. We believe that by relaxing those constraints, i.e. fine-tuning also the degree *d* and the positions of knots, while leading to a heavier implementation, could significantly improve the capability of the model to capture local structures of the target function, especially at high frequencies (the ones that we are really targeting with our analysis). Since the *polynomial regression* fit exhibits non-linearity in the values of interests, a more attentive analysis on those data should be carried out.
+
+# Part II
+## Simple linear model fit
+
+```{r Part II Pt. 1&2}
+
+wmap_sb <- wmap[401:length(wmap$x),]
+
+lin_fit <- lm(y ~ x, data = wmap_sb)
+
+summary(lin_fit)
+plot(lin_fit)
+
+plot(wmap_sb$x, wmap_sb$y, pch = 21, bg = "yellow", cex = .7,
+main = "CMB data (WMAP)", xlab = "Multipole", ylab = "Power")
+legend("topleft", legend=c("Simple Linear Model"),col=c("green"), lty=1, lwd = 3)
+lines(wmap_sb$x, predict(lin_fit, data.frame(x = wmap_sb$x)), lwd = 3, col = "green")
+
+MSEp_hat <- mean(residuals(lin_fit)^2)
+MSEp_hat
+```
+
+A qualitative analysis of the *Residuals vs Fitted* and the *Normal Q-Q plots* suggests that the assumptions of normal distribution and homoskedasticity of the residuals (proper of linear regression models) might be violated: the points in the former exhibits a funnel shape, and the ones in the latter fall along a line in the middle of the graph, but curve off in the extremities, meaning that our data have more extreme values than would be expected if they truly came from a Normal distribution. In addition, the p-value of the variable *x* is not statistically significant, being above the *0.05* threshold. Hence, we believe the linear model may hardly be adequate.
+
+```{r Part II Pt. 3}
+
+# Fit regression splines (GCV-tuned)
+design_matrices_sb <- regr_spline_vect(wmap_sb$x,dq_grid)
+
+npars_sb <- unlist(lapply(dq_grid, npar_count))
+spline_formula_sb <- function(x){
+  X_df <- as.data.frame(x)[,-1]
+  X_df$y <- wmap_sb$y
+  return(lm(y ~ .,X_df))}
+fits_sb    <- lapply(design_matrices_sb, spline_formula_sb)
+MSEs.tr_sb <- unlist(lapply(fits_sb, deviance))/length(wmap_sb$x)
+GCV_sb     <- MSEs.tr_sb/(1-(npars_sb)/length(wmap_sb$x))^2
+
+gcv_opt <- dq_grid[which.min(GCV_sb)] # optimal GCV-based (d,q) combination
+gcv_opt
+min(GCV_sb)
+
+X <- regr_spline(wmap_sb$x, gcv_opt[[1]])
+
+X_df_sb <- as.data.frame(X)[,-1]
+X_df_sb$y <- wmap_sb$y
+
+fit_sb <- lm(y ~ ., data = X_df_sb)
+MSEnp_hat <- mean(residuals(fit_sb)^2)
+MSEnp_hat
+
+plot(wmap_sb$x, wmap_sb$y, pch = 21, bg = "yellow", cex = .7,
+main = "CMB data (WMAP)", xlab = "Multipole", ylab = "Power")
+legend("topleft", legend=c("Simple Linear Model", "Regression Splines", "Knots"),col=c("green", "blue", "red"), lty=c(1,1,2), lwd = 3)
+lines(wmap_sb$x, predict(lin_fit, data.frame(x = wmap_sb$x)), lwd = 3, col = "green")
+lines(wmap_sb$x, predict(fit_sb, X_df_sb), lwd = 3, col = "blue")
+knots <- qknots(wmap_sb$x, 10)
+for(i in 1:10) lines(c(knots[i],knots[i]), c(-1e7,1e7), lty = 2, lwd = 1, col = "red")
+```
+
+The regression splines exhibits a *non-linear* behavior for high Multipole values.
+
+```{r Part II Pt.4,5,6}
+
+t_hat = MSEp_hat - MSEnp_hat
+
+sim_lm = function(lin_fit, sim_x) {
+  n = length(sim_x)
+  sim_fr = data.frame(x = sim_x)
+  sigma = summary(lin_fit)$sigma
+  y_sim = predict(lin_fit, newdata = sim_fr)
+  y_sim = y_sim + rnorm(n, 0, sigma) # Add noise
+  sim_fr = data.frame(sim_fr, y = y_sim) # Adds y column
+  return(sim_fr)
+}
+
+B <- 1000
+
+set.seed(2022)
+
+t_tilde = rep(NA,B)
+
+for(b in 1:B){
+  sim_fr <- sim_lm(lin_fit, wmap_sb$x)
+  
+  # Parametric model
+  lin_fit <- lm(y ~ x, data = sim_fr)
+  MSEp_tilde <- mean(residuals(lin_fit)^2)
+  
+  # Nonparametric model
+  design_matrices_sb <- regr_spline_vect(sim_fr$x,dq_grid)
+  npars_sb <- unlist(lapply(dq_grid, npar_count))
+  
+  spline_formula_sb <- function(x){
+    X_df <- as.data.frame(x)[,-1]
+    X_df$y <- sim_fr$y
+    return(lm(y ~ .,X_df))}
+  
+  fits_sb <- lapply(design_matrices_sb, spline_formula_sb)
+  MSEs.tr_sb <- unlist(lapply(fits_sb, deviance))/length(sim_fr$x)
+  GCV_sb  <- MSEs.tr_sb/(1-(npars_sb)/length(sim_fr$x))^2
+
+  gcv_opt <- dq_grid[which.min(GCV_sb)] # optimal GCV-based (d,q) combination
+
+  X <- regr_spline(sim_fr$x, gcv_opt[[1]])
+
+  X_df <- as.data.frame(X)[,-1]
+  X_df$y <- sim_fr$y
+  fit <- lm(y ~ ., data = X_df)
+  MSEnp_tilde <- mean(residuals(fit)^2)
+  
+  t_tilde[b] <- MSEp_tilde - MSEnp_tilde
+  
+}
+
+p_value <- (1/B)*sum(t_tilde>t_hat)
+p_value
+```
+
+Since the *p-value* is statistically significant, according to our test we can *reject* the null hypothesis (H0: parametric model is correct). Therefore, this might suggest statistical evidence of departures from linearity in the data distribution (those secondary bumps we were looking for!).
+
+However, we should be aware that the *heteroskedascity* problem is still at stake.. By looking at the data scatterplot, it is possible to identify a *significant increase* in observations range for bigger values of Multipole: in a similar scenario, linear models might be more prone to suffer from heteroskedasticity, with the *Residuals vs Fitted values* plot displaying the observed funnel shape.
+
+This might be a potential *red flag*: if the homoskedasticity assumption behind the simulation scheme adopted was violated, we could not trust our statistical results and our conclusions would not be reliable. Furthermore, in general, if the model considered is *far* from the "true" (unknown) data generating one, the *parametric bootstrap* approach performs poorly.
+
+However, when the model is close to be "correct", *parametric bootstrap* performs rather well, even at small sample sizes; in this last scenario, we believe *B = 1000* and *n ~ 500* would be sufficient to obtain trustworthy results.
